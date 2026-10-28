@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>QuizRoom — Play</title><link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top-bar"><div class="brand">Quiz<span>Room</span></div><div id="scoreDisplay" class="player-score">0 pts</div></header>
+<main class="play-container">
+<section id="setupScreen" class="game-card"><h1>Join QuizRoom</h1><p id="setupRoom" class="muted"></p><label for="playName">Your name</label><input id="playName" maxlength="20" placeholder="Enter your name"><button id="joinButton" class="button primary full">Join</button><p id="playError" class="error hidden"></p></section>
+<section id="waitingScreen" class="game-card hidden"><div class="loading-icon">✓</div><h1>You're in!</h1><p class="muted">Waiting for the host to start the quiz.</p><div class="waiting-name" id="waitingName"></div></section>
+<section id="questionScreen" class="game-card hidden"><div class="question-info"><span id="questionNumber"></span><span id="timer">20</span></div><div class="timer-bar"><div id="timerFill"></div></div><h1 id="questionText" class="question-card"></h1><div id="answerButtons" class="player-answer-grid"></div><p id="answerStatus" class="answer-status"></p></section>
+<section id="resultScreen" class="game-card result-card hidden"><div id="resultIcon" class="result-icon">✓</div><h1 id="resultTitle"></h1><div id="points" class="points"></div><p id="resultDetail" class="muted"></p></section>
+<section id="finalScreen" class="game-card final-card hidden"><div class="trophy">🏆</div><h1>Quiz complete!</h1><div id="finalScore" class="big-score"></div><p id="finalRank" class="muted"></p><div id="podium" class="podium"></div></section>
+</main>
+<script>
+const params=new URLSearchParams(location.search),roomCode=(params.get("code")||"").toUpperCase();
+let socket=null,playerToken=localStorage.getItem(`quizroom_token_${roomCode}`),playerName=localStorage.getItem("quizroom_name")||"",timerInterval=null;
+const $=id=>document.getElementById(id);$("setupRoom").textContent=roomCode?`Room ${roomCode}`:"No room code supplied.";$("playName").value=playerName;$("joinButton").onclick=joinQuiz;
+if(roomCode&&playerToken)connect();else if(!roomCode)showError("No room code was provided.");
+async function joinQuiz(){playerName=$("playName").value.trim();if(!playerName)return showError("Enter your name.");localStorage.setItem("quizroom_name",playerName);playerToken=null;localStorage.removeItem(`quizroom_token_${roomCode}`);connect()}
+function connect(){
+ const p=location.protocol==="https:"?"wss:":"ws:";socket=new WebSocket(`${p}//${location.host}/ws/play/${encodeURIComponent(roomCode)}`);
+ socket.onopen=()=>socket.send(JSON.stringify({type:"join",name:playerName,token:playerToken}));
+ socket.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==="joined"){playerToken=d.token;localStorage.setItem(`quizroom_token_${roomCode}`,playerToken)}if(d.type==="sync")update(d);if(d.type==="error"){
+    clearInterval(timerInterval);
+    if(d.code==="expired" || d.code==="no_room" || d.code==="locked" || d.code==="name_taken" || d.code==="bad_name"){
+        playerToken=null;
+        localStorage.removeItem(`quizroom_token_${roomCode}`);
+    }
+    showError(d.message);
+    show("setupScreen");
+}if(d.type==="removed"){playerToken=null;localStorage.removeItem(`quizroom_token_${roomCode}`);showError("You were removed from the room.");show("setupScreen")}};
+ socket.onclose=()=>{
+    if ($("finalScreen").classList.contains("hidden") && roomCode && playerToken) {
+        clearTimeout(window.quizReconnect);
+        window.quizReconnect = setTimeout(connect, 1500);
+    }
+};
+}
+function update(d){
+ $("scoreDisplay").textContent=`${d.score||0} pts`;
+ if(d.status==="pending"||d.state==="lobby"){ $("waitingName").textContent=d.name||playerName;show("waitingScreen");return}
+ if(d.state==="question"){show("questionScreen");renderQuestion(d);return}
+ if(d.state==="reveal"){show("resultScreen");renderResult(d);return}
+ if(d.state==="ended"){show("finalScreen");renderFinal(d)}
+}
+function renderQuestion(d){
+ const q=d.question;$("questionNumber").textContent=`Question ${d.qi+1} of ${d.total}`;$("questionText").textContent=q.text;
+ $("answerButtons").innerHTML=q.options.map((o,i)=>`<button class="answer-button ${d.choice===i?"selected":""}" data-choice="${i}" ${d.answered?"disabled":""}><span>${String.fromCharCode(65+i)}</span>${esc(o)}</button>`).join("");
+ document.querySelectorAll(".answer-button").forEach(b=>b.onclick=()=>sendAnswer(+b.dataset.choice));
+ $("answerStatus").textContent=d.answered?"Answer submitted — wait for the reveal.":"Choose an answer";
+ startTimer(d.remaining_ms,q.time);
+}
+function sendAnswer(choice){if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({type:"answer",choice}))}
+function startTimer(ms,duration){
+ clearInterval(timerInterval);const start=Date.now()-(duration*1000-ms);
+ const tick=()=>{const rem=Math.max(0,duration*1000-(Date.now()-start));$("timer").textContent=Math.ceil(rem/1000);$("timerFill").style.width=`${Math.max(0,Math.min(100,rem/(duration*1000)*100))}%`;if(!rem)clearInterval(timerInterval)};tick();timerInterval=setInterval(tick,100);
+}
+function renderResult(d){clearInterval(timerInterval);const r=d.result||{},correct=r.correct===true;$("resultIcon").textContent=correct?"✓":r.correct===false?"✕":"—";$("resultTitle").textContent=correct?"Correct!":r.correct===false?"Not quite!":"Time's up";$("points").textContent=correct?`+${r.points||0}`:"0";$("resultDetail").textContent=`Correct answer: ${d.question.options[d.correct]} • Rank ${d.rank} of ${d.of}`}
+function renderFinal(d){clearInterval(timerInterval);$("finalScore").textContent=`${d.score||0} points`;$("finalRank").textContent=`You finished ${ord(d.rank)} of ${d.of}`;$("podium").innerHTML=(d.podium||[]).map((p,i)=>`<div class="podium-row"><span>${["🥇","🥈","🥉"][i]||""} ${esc(p.name)}</span><strong>${p.score}</strong></div>`).join("")}
+function ord(n){if(n%100>=11&&n%100<=13)return`${n}th`;return`${n}${["th","st","nd","rd"][Math.min(n%10,3)]}`}
+function show(id){["setupScreen","waitingScreen","questionScreen","resultScreen","finalScreen"].forEach(x=>$(x).classList.toggle("hidden",x!==id))}
+function showError(m){$("playError").textContent=m;$("playError").classList.remove("hidden")}
+function esc(v){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
+</script>
+</body></html>

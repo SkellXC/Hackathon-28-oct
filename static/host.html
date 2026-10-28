@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuizRoom — Host</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top-bar">
+  <div class="brand">Quiz<span>Room</span></div>
+  <div id="roomDisplay" class="room-display hidden">Room <strong id="roomCodeDisplay"></strong></div>
+</header>
+<main class="host-container">
+<section id="builderPanel" class="panel">
+  <div class="section-heading"><div><h1>Create your quiz</h1><p class="muted">Build the questions, then create a room.</p></div></div>
+  <label for="quizTitle">Quiz title</label>
+  <input id="quizTitle" maxlength="80" value="My Quiz">
+  <div id="questions"></div>
+  <div class="builder-actions">
+    <button id="addQuestion" class="button secondary">+ Add question</button>
+    <button id="createQuiz" class="button primary">Create Room</button>
+  </div>
+  <p id="builderError" class="error hidden"></p>
+</section>
+
+<section id="lobbyPanel" class="hidden">
+<div class="host-grid">
+<div>
+<section class="panel join-panel">
+  <h2>Join the quiz</h2>
+  <p class="muted">Scan the QR code with a phone or use the address below.</p>
+  <div class="room-code-large" id="bigRoomCode">----</div>
+  <div class="qr-wrap"><img id="joinQr" class="qr-code" alt="QR code to join QuizRoom"><div id="qrFallback" class="qr-fallback hidden"><strong>QR code could not be loaded.</strong><span>Use the join address below or enter the room code manually.</span></div></div>
+  <div id="joinUrl" class="join-url"></div>
+  <p id="networkHint" class="muted small"></p>
+</section>
+<section class="panel">
+  <div class="section-heading">
+    <div><h2>Players</h2><p class="muted"><span id="playerCount">0</span> approved</p></div>
+    <span id="roomStatus" class="status-pill">OPEN</span>
+  </div>
+  <div id="pendingList"></div>
+  <div id="playerList" class="player-list"></div>
+  <div class="lobby-actions">
+    <button id="approveAll" class="button secondary">Approve all</button>
+    <button id="lockButton" class="button secondary">Lock room</button>
+    <button id="startButton" class="button primary" disabled>Start quiz</button>
+  </div>
+</section>
+</div>
+
+<section class="panel game-panel">
+  <div id="gameWaiting"><div class="empty-state"><div class="empty-icon">🎮</div><h2>Waiting for players</h2><p class="muted">Approve players and start when you're ready.</p></div></div>
+  <div id="gameContent" class="hidden">
+    <div class="game-header"><span id="questionNumber"></span><span id="answerProgress"></span></div>
+    <h2 id="hostQuestion" class="host-question"></h2>
+    <div id="hostAnswers" class="answer-grid"></div>
+    <div id="revealPanel" class="reveal-panel hidden"><strong id="correctAnswer"></strong><div id="answerCounts" class="counts"></div></div>
+    <div class="host-controls"><button id="nextButton" class="button primary">Next</button><button id="endButton" class="button danger">End quiz</button></div>
+    <div id="leaderboard" class="leaderboard"></div>
+  </div>
+  <div id="endedContent" class="hidden"><div class="empty-state"><div class="empty-icon">🏆</div><h2>Quiz complete</h2><div id="finalLeaderboard" class="leaderboard"></div></div></div>
+</section>
+</div>
+</section>
+</main>
+
+<script>
+let questions=[],roomCode=null,hostToken=null,hostSocket=null,latestSync=null;
+const $=id=>document.getElementById(id);
+
+function addQuestion(data={}){
+ questions.push({text:data.text||"",options:data.options||["","","",""],correct:Number.isInteger(data.correct)?data.correct:0,time:data.time||20});
+ renderQuestions();
+}
+function renderQuestions(){
+ const c=$("questions");c.innerHTML="";
+ questions.forEach((q,i)=>{
+  const card=document.createElement("div");card.className="question-builder";
+  card.innerHTML=`<div class="question-builder-header"><h3>Question ${i+1}</h3>${questions.length>1?`<button class="text-button remove-question" data-index="${i}">Remove</button>`:""}</div>
+  <label>Question</label><input class="q-text" data-index="${i}" maxlength="200" value="${esc(q.text)}" placeholder="Enter your question">
+  <div class="options-editor">${q.options.map((o,j)=>`<div><label>Answer ${j+1}</label><input class="q-option" data-index="${i}" data-option="${j}" maxlength="100" value="${esc(o)}" placeholder="Answer ${j+1}"></div>`).join("")}</div>
+  <div class="question-settings"><div><label>Correct answer</label><select class="q-correct" data-index="${i}">${q.options.map((_,j)=>`<option value="${j}" ${q.correct===j?"selected":""}>Answer ${j+1}</option>`).join("")}</select></div>
+  <div><label>Time (seconds)</label><input class="q-time" data-index="${i}" type="number" min="5" max="120" value="${q.time}"></div></div>`;
+  c.appendChild(card);
+ });
+ document.querySelectorAll(".q-text").forEach(e=>e.oninput=ev=>questions[+ev.target.dataset.index].text=ev.target.value);
+ document.querySelectorAll(".q-option").forEach(e=>e.oninput=ev=>questions[+ev.target.dataset.index].options[+ev.target.dataset.option]=ev.target.value);
+ document.querySelectorAll(".q-correct").forEach(e=>e.onchange=ev=>questions[+ev.target.dataset.index].correct=+ev.target.value);
+ document.querySelectorAll(".q-time").forEach(e=>e.oninput=ev=>questions[+ev.target.dataset.index].time=+ev.target.value);
+ document.querySelectorAll(".remove-question").forEach(e=>e.onclick=ev=>{questions.splice(+ev.target.dataset.index,1);renderQuestions();});
+}
+function esc(v){return String(v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));}
+
+$("addQuestion").onclick=()=>{if(questions.length<50)addQuestion()};
+$("createQuiz").onclick=async()=>{
+ $("builderError").classList.add("hidden"); if(!questions.length)addQuestion();
+ const payload={title:$("quizTitle").value.trim()||"Quiz",questions:questions.map(q=>({text:q.text.trim(),options:q.options.map(x=>x.trim()),correct:q.correct,time:Number(q.time)}))};
+ const bad=payload.questions.findIndex(q=>!q.text||q.options.some(x=>!x)||q.correct<0||q.correct>=q.options.length||q.time<5||q.time>120);
+ if(bad!==-1)return err(`Please complete Question ${bad+1} and check its settings.`);
+ try{
+  const r=await fetch("/api/rooms",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+  const d=await r.json();if(!r.ok)throw new Error(d.detail||"Could not create the room.");
+  roomCode=d.code;hostToken=d.host_token;
+  $("builderPanel").classList.add("hidden");$("lobbyPanel").classList.remove("hidden");$("roomDisplay").classList.remove("hidden");
+  $("roomCodeDisplay").textContent=roomCode;$("bigRoomCode").textContent=roomCode;
+  await setupJoinQr();connectHost();
+ }catch(e){err(e.message);}
+};
+async function setupJoinQr(){
+    const qr = $("joinQr");
+    const hint = $("networkHint");
+    const urlBox = $("joinUrl");
+
+    // Cloud deployment: location.origin is already the public address.
+    // Local deployment: use the machine's LAN IP so phones on the same Wi-Fi
+    // do not receive a QR code pointing at localhost.
+    let baseUrl = location.origin;
+
+    try {
+        const r = await fetch("/api/info", {cache:"no-store"});
+        const info = await r.json();
+
+        if (location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+            if (info.lan_ip) {
+                const protocol = location.protocol === "https:" ? "https" : "http";
+                const port = location.port ? `:${location.port}` : "";
+                baseUrl = `${protocol}://${info.lan_ip}${port}`;
+                hint.textContent = "Phone join: use the QR code while connected to the same Wi-Fi.";
+            } else {
+                hint.textContent = "Could not detect your LAN address. Use the address shown below.";
+            }
+        } else {
+            hint.textContent = "Players can scan this code from any device with internet access.";
+        }
+    } catch (e) {
+        hint.textContent = "QR setup failed. You can still use the room code manually.";
+    }
+
+    const joinUrl = `${baseUrl}/?code=${encodeURIComponent(roomCode)}`;
+    urlBox.textContent = joinUrl;
+
+    qr.onload = () => {
+        $("qrFallback").classList.add("hidden");
+        qr.classList.remove("hidden");
+    };
+    qr.onerror = () => {
+        qr.classList.add("hidden");
+        $("qrFallback").classList.remove("hidden");
+    };
+
+    qr.src = `/api/qr?data=${encodeURIComponent(joinUrl)}&v=${Date.now()}`;
+}
+
+function connectHost(){
+ if(hostSocket&&hostSocket.readyState<=1)return;
+ const p=location.protocol==="https:"?"wss:":"ws:";
+ hostSocket=new WebSocket(`${p}//${location.host}/ws/host/${encodeURIComponent(roomCode)}?token=${encodeURIComponent(hostToken)}`);
+ hostSocket.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==="sync")updateHost(d);if(d.type==="progress")$("answerProgress").textContent=`${d.answered}/${d.expected} answered`;if(d.type==="error")alert(d.message)};
+ hostSocket.onclose=()=>{if(roomCode)setTimeout(connectHost,1500)};
+}
+function sendHost(m){if(hostSocket&&hostSocket.readyState===WebSocket.OPEN)hostSocket.send(JSON.stringify(m));}
+function updateHost(d){
+ latestSync=d;$("playerCount").textContent=d.players.length;$("roomStatus").textContent=d.locked?"LOCKED":"OPEN";$("lockButton").textContent=d.locked?"Unlock room":"Lock room";$("startButton").disabled=d.players.length===0;
+ renderPending(d.pending||[]);renderPlayers(d.players||[]);
+ if(d.state==="lobby"){showGame("gameWaiting");return}
+ if(d.state==="ended"){showGame("endedContent");renderLeaderboard(d.leaderboard||[],$("finalLeaderboard"));return}
+ showGame("gameContent");
+ if(d.question){
+  $("questionNumber").textContent=`Question ${d.qi+1} of ${d.total}`;$("hostQuestion").textContent=d.question.text;$("answerProgress").textContent=`${d.answered}/${d.expected} answered`;
+  $("hostAnswers").innerHTML=d.question.options.map((o,i)=>`<div class="answer-option ${d.state==="reveal"&&i===d.correct?"correct":""}"><span>${String.fromCharCode(65+i)}</span>${esc(o)}</div>`).join("");
+  if(d.state==="reveal"){$("revealPanel").classList.remove("hidden");$("correctAnswer").textContent=`Correct answer: ${d.question.options[d.correct]}`;$("answerCounts").innerHTML=d.counts.map((n,i)=>`<div><span>${String.fromCharCode(65+i)}</span> ${n}</div>`).join("");$("nextButton").textContent=d.qi+1<d.total?"Next question":"Finish quiz"}
+  else{$("revealPanel").classList.add("hidden");$("nextButton").textContent="Reveal answer"}
+  renderLeaderboard(d.leaderboard||[],$("leaderboard"));
+ }
+}
+function showGame(id){["gameWaiting","gameContent","endedContent"].forEach(x=>$(x).classList.toggle("hidden",x!==id))}
+function renderPending(ps){
+ const c=$("pendingList");if(!ps.length){c.innerHTML="";return}
+ c.innerHTML=`<div class="pending-box"><strong>Waiting for approval</strong>${ps.map(p=>`<div class="player-row"><span>${esc(p.name)}</span><div><button class="small-button approve" data-id="${p.id}">Approve</button><button class="small-button deny" data-id="${p.id}">Deny</button></div></div>`).join("")}</div>`;
+ c.querySelectorAll(".approve").forEach(b=>b.onclick=()=>sendHost({type:"approve",id:b.dataset.id}));c.querySelectorAll(".deny").forEach(b=>b.onclick=()=>sendHost({type:"deny",id:b.dataset.id}));
+}
+function renderPlayers(ps){
+ $("playerList").innerHTML=ps.length?ps.map(p=>`<div class="player-row"><span>${esc(p.name)}</span><span class="player-meta">${p.online?"● Online":"○ Offline"} <button class="small-button kick" data-id="${p.id}">Kick</button></span></div>`).join(""):`<div class="empty-list">No approved players yet.</div>`;
+ $("playerList").querySelectorAll(".kick").forEach(b=>b.onclick=()=>sendHost({type:"kick",id:b.dataset.id}));
+}
+function renderLeaderboard(rows,target){
+ target.innerHTML=rows.length?"<h3>Leaderboard</h3>"+rows.map((p,i)=>`<div class="leader-row"><span><strong>${i+1}.</strong> ${esc(p.name)}</span><strong>${p.score}</strong>${p.delta!==undefined?`<small>+${p.delta}</small>`:""}</div>`).join(""):"";
+}
+$("approveAll").onclick=()=>sendHost({type:"approve_all"});
+$("lockButton").onclick=()=>sendHost({type:"lock",value:!latestSync?.locked});
+$("startButton").onclick=()=>sendHost({type:"start"});
+$("nextButton").onclick=()=>sendHost({type:"next"});
+$("endButton").onclick=()=>{if(confirm("End this quiz for everyone?"))sendHost({type:"end"})};
+function err(m){$("builderError").textContent=m;$("builderError").classList.remove("hidden")}
+addQuestion();
+</script>
+</body>
+</html>
